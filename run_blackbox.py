@@ -11,7 +11,7 @@ from models.resnet import ResNet18
 
 
 def run(args):
-    device = torch.device('cuda')
+    device = torch.device('cpu')
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),

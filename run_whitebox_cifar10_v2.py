@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(current_dir, '..'))
 
 
 def run(args):
-    device = torch.device('cuda')
+    device = torch.device('cpu')
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),

@@ -55,6 +55,8 @@ def fine_tune(model, optimizer, dataloader, epochs):
             t = t.to(device)
             optimizer.zero_grad()
             pred = model(d)
+            if isinstance(pred, tuple):
+                pred = pred[0]
             loss = criterion(pred, t)
             loss.backward()
             optimizer.step()
@@ -73,6 +75,8 @@ def test(model, dataloader):
             data = data.to(device)
             target = target.to(device)
             pred = model(data)
+            if isinstance(pred, tuple):
+                pred = pred[0]
             loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
             pred = pred.max(1, keepdim=True)[1]
             correct_idx += (pred.view_as(target) == target).nonzero(as_tuple=True)[0].cpu() + runcount
@@ -138,13 +142,9 @@ def subsample_training_data(dataset, target_class):
 
 def train_whitebox(model, optimizer, dataloader, b, centers, args, is_attack=False, save_path=None):
     model.train()
-    criterion = torch.nn.CrossEntropyLoss().cuda()
+    criterion = torch.nn.CrossEntropyLoss()
     device = next(model.parameters()).device
     x_value = np.random.randn(args.embed_bits, 512)
-    # if is_attack:
-    #     save_path = 'logs/whitebox/attacker/projection_matrix.npy'
-    # else:
-    #     save_path = 'logs/whitebox/marked/projection_matrix.npy'
     np.save(save_path, x_value)
     x_value = torch.tensor(x_value, dtype=torch.float32).to(device)
     b = torch.tensor(b).to(device)
@@ -154,13 +154,22 @@ def train_whitebox(model, optimizer, dataloader, b, centers, args, is_attack=Fal
             d = d.to(device)
             t = t.to(device)
             optimizer.zero_grad()
-            # pred, feat = model(d)  # for MLP
-            pred, feat = model(d)
+            pred = model(d)
+            feat = None
+            if isinstance(pred, tuple):
+                pred, feat = pred
+            else:
+                feat = pred
             loss = criterion(pred, t)
             centers_batch = torch.gather(centers, 0, t.unsqueeze(1).repeat(1, feat.shape[1]))
             loss1 = F.mse_loss(feat, centers_batch, reduction='sum') / 2
             centers_batch_reshape = torch.unsqueeze(centers_batch, 1)
             centers_reshape = torch.unsqueeze(centers, 0)
+            # shape 맞추기: centers_batch_reshape [B,1,512], centers_reshape [1,10,512]
+            if centers_batch_reshape.shape[2] != centers_reshape.shape[2]:
+                min_dim = min(centers_batch_reshape.shape[2], centers_reshape.shape[2])
+                centers_batch_reshape = centers_batch_reshape[..., :min_dim]
+                centers_reshape = centers_reshape[..., :min_dim]
             pairwise_dists = (centers_batch_reshape - centers_reshape) ** 2
             pairwise_dists = torch.sum(pairwise_dists, dim=-1)
             arg = torch.topk(-pairwise_dists, k=2)[1]

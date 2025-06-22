@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(current_dir, '..'))
 
 
 def run(args):
-    device = torch.device('cuda')
+    device = torch.device('cpu')
     transform = transforms.Compose([transforms.ToTensor()])
     trainset = torchvision.datasets.MNIST(root="./data/",
                                           transform=transform,
