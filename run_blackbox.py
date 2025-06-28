@@ -20,10 +20,13 @@ def run(args):
     ])
     trainset = torchvision.datasets.CIFAR10(
         root='./data', train=True, download=True, transform=transform_train)
-    # ---- Embed WM ------ #
+    
+    # ---- 블랙박스 키 생성 (Fig. 1 ②③) ------ #
     model = ResNet18().to(device)
     model.load_state_dict(torch.load('logs/blackbox/ummarked/resnet18.pth'))
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.0, nesterov=True)
+    
+    # key_generation() 함수 호출 - 블랙박스 키 생성
     x_key, y_key = key_generation(model, optimizer, trainset, args.key_len, 32, args.n_classes, args.epochs)
     key_data = torch.utils.data.TensorDataset(x_key, y_key)
     key_loader = DataLoader(key_data,
@@ -31,7 +34,7 @@ def run(args):
                             shuffle=False,
                             num_workers=2)
 
-    # ----- Detect WM ------ #
+    # ----- 블랙박스 검증 (Alg. 4 Steps 2-3) ------ #
     marked_model = ResNet18().to(device)
     marked_model.load_state_dict(torch.load('logs/blackbox/ummarked/resnet18.pth'))
     acc_meter = 0
@@ -43,6 +46,8 @@ def run(args):
             pred, _ = marked_model(data)
             pred = pred.max(1, keepdim=True)[1]
             acc_meter += pred.eq(target.view_as(pred)).sum().item()
+    
+    # compute_mismatch_threshold() - 식 (4) 구현
     theta = compute_mismatch_threshold(c=args.n_classes, kp=args.key_len, p=args.th)  # pk = 1/C, |K|: # trials
     print('probability threshold p is ', args.th)
     print('Mismatch threshold is : ', theta)

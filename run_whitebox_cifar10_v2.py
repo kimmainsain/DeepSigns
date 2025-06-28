@@ -37,12 +37,14 @@ def run(args):
     testloader = torch.utils.data.DataLoader(
         testset, batch_size=100, shuffle=False, num_workers=2)
 
-    # ---- WM configs ------ #
-    # binary prior info to be embedded, shape (T, 10)
+    # ---- 화이트박스 워터마킹 설정 (Fig. 1 ③) ------ #
+    # binary prior info to be embedded, shape (T, 10) - 비트 b
     b = np.random.randint(2, size=(args.embed_bits, args.n_classes))
     np.save('logs/whitebox/resnet18/marked/b.npy', b)
-    # ---- Embed WM ------ #
+    
+    # ---- 화이트박스 워터마킹 학습 ------ #
     model = ResNet18().to(device)
+    # centers(μ) 를 trainable buffer로 두고 MSE + cosine으로 정렬
     centers = torch.nn.Parameter(torch.rand(args.n_classes, 512).to(device), requires_grad=True)
     optimizer = torch.optim.SGD([
         {'params': model.parameters()},
@@ -50,8 +52,10 @@ def run(args):
     ], lr=args.lr,
         momentum=0.9, weight_decay=5e-4)
 
+    # train_whitebox() 함수 호출 - 화이트박스 워터마킹 학습
     train_whitebox(model, optimizer, trainloader, b, centers, args, save_path='./logs/whitebox/resnet18/marked/projection_matrix.npy')
 
+    # 모델 성능 평가
     model.eval()
     loss_meter = 0
     acc_meter = 0
@@ -68,18 +72,26 @@ def run(args):
     sd_path = 'logs/whitebox/resnet18/marked/resnet18.pth'
     torch.save(model.state_dict(), sd_path)
 
-    # ---- Validate WM ---- #
+    # ---- 화이트박스 워터마크 검증 (Alg. 3) ---- #
     marked_model = ResNet18().to(device)
     # summary(marked_model, input_size=(1, 28, 28))
     marked_model.load_state_dict(torch.load(sd_path))
+    
+    # subsample_training_data() - 키용 mini subset 생성
     x_train_subset_loader = subsample_training_data(trainset, args.target_class)
+    
+    # get_activations() - 선택 층 출력 획득
     marked_activations = get_activations(marked_model, x_train_subset_loader)
     print("Get activations of marked FC layer")
     # choose the activations from first wmarked dense layer
     marked_FC_activations = marked_activations
+    
+    # extract_WM_from_activations() - 워터마크 추출
     A = np.load('logs/whitebox/resnet18/marked/projection_matrix.npy')
     print('A = ', A)
     decoded_WM = extract_WM_from_activations(marked_FC_activations, A)
+    
+    # compute_BER() - 비트 오류율 계산
     BER = compute_BER(decoded_WM, b[:, args.target_class])
     print("BER in class {} is {}: ".format(args.target_class, BER))
 
@@ -90,8 +102,8 @@ def main():
                         help='Number of classes in data')
     parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
     parser.add_argument('--epochs', default=50, type=int, help='embed_epoch')
-    parser.add_argument('--scale', default=0.01, type=float, help='for loss1')
-    parser.add_argument('--gamma', default=0.01, type=float, help='for loss2')
+    parser.add_argument('--scale', default=0.01, type=float, help='for loss1')  # args.scale→λ₁
+    parser.add_argument('--gamma', default=0.01, type=float, help='for loss2')  # args.gamma→λ₂
     parser.add_argument('--target_dense_idx', default=2, type=int, help='target layer to carry WM')
     parser.add_argument('--embed_bits', default=16, type=int)
     parser.add_argument('--target_class', default=0, type=int)
