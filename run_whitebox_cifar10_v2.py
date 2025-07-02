@@ -18,6 +18,7 @@ from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import torchvision
 from torchvision import transforms
 from torchsummary import summary
+import numpy as np
 
 from models.resnet import ResNet18
 from utils import *
@@ -128,9 +129,33 @@ def run(args):
     decoded_WM = extract_WM_from_activations(marked_FC_activations, A)
     
     # (Step V)   : BER 계산
-    # compute_BER() - 비트 오류율 계산
     BER = compute_BER(decoded_WM, b[:, args.target_class])
     print("BER in class {} is {}: ".format(args.target_class, BER))
+
+    # ──────────────────────────────── 〈추가 로그/덤프 구간〉 ──────────────────────────────── #
+    import hashlib
+
+    # 1) A·b 내용∙형상 확인
+    print("A shape :", A.shape)
+    print("first 3 rows of A\n", A[:3])
+    print("b shape :", b.shape)
+    print("b[:, {}] =".format(args.target_class), b[:, args.target_class])
+
+    # 2) 휴먼-리더블 TXT 저장
+    np.savetxt('A_matrix.txt', A, fmt='%.6f', delimiter=',')
+    np.savetxt('b_bits.txt', b, fmt='%d', delimiter='')
+
+    # 3) SHA-256 해시 출력
+    def sha256_of_npy(path):
+        data = np.load(path)
+        return hashlib.sha256(data.tobytes()).hexdigest()
+
+    hash_A = sha256_of_npy('logs/whitebox/resnet18/marked/projection_matrix.npy')
+    hash_b = sha256_of_npy('logs/whitebox/resnet18/marked/b.npy')
+
+    print("SHA256(A) :", hash_A)
+    print("SHA256(b) :", hash_b)
+    # ─────────────────────────────────────────────────────────────────────────────────────── #
 
 
 # ────────────────────────────────────────────────────────────── #
