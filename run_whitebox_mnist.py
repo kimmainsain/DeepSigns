@@ -21,9 +21,9 @@ import torch
 import torch.nn.functional as F
 import torchvision
 from torchvision import transforms
-from torchsummary import summary          # (선택) 네트워크 요약
 from models.mlp import MLP                # 두 층 512-FC MLP + feat 반환
 from utils import *                       # train_whitebox, BER 등 유틸
+import hashlib
 
 # ── 프로젝트 루트 경로 추가 ───────────────────────────────── #
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,7 +34,7 @@ def run(args):
     # ───────────────────────────────────────────────────────── #
     # 0. 환경 설정 + MNIST 데이터 로드                           #
     # ───────────────────────────────────────────────────────── #
-    device = torch.device('cpu')  # CUDA 사용 시 'cuda'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     transform = transforms.Compose([transforms.ToTensor()])
 
     trainset = torchvision.datasets.MNIST(
@@ -52,6 +52,7 @@ def run(args):
     #    b ∈ {0,1}^{embed_bits × 10} (N-bit × 클래스)           #
     # ───────────────────────────────────────────────────────── #
     b = np.random.randint(2, size=(args.embed_bits, args.n_classes))
+    np.save('logs/whitebox/mlp/marked/b.npy', b)  # 비트열 b 저장
     # (저장은 필요 시 utils 내부에서 진행하므로 여기선 메모리 보관)
 
     # ───────────────────────────────────────────────────────── #
@@ -117,6 +118,25 @@ def run(args):
     # 5-5. (Step V) BER 계산
     BER = compute_BER(decoded_bits, b[:, args.target_class])
     print(f"BER for class {args.target_class} = {BER}")
+
+    print("A shape :", A.shape)
+    print("first 3 rows of A\n", A[:3])
+    print("b shape :", b.shape)
+    print("b[:, 0] =", b[:, 0])   # 예: 클래스 0 워터마크
+
+    np.savetxt('A_matrix.txt', A, fmt='%.6f', delimiter=',')
+    np.savetxt('b_bits.txt', b, fmt='%d', delimiter='')
+
+    def sha256_of_npy(path):
+        data = np.load(path)
+        h    = hashlib.sha256(data.tobytes()).hexdigest()
+        return h
+
+    hash_A = sha256_of_npy('logs/whitebox/mlp/marked/projection_matrix.npy')
+    hash_b = sha256_of_npy('logs/whitebox/mlp/marked/b.npy')
+
+    print("SHA256(A) :", hash_A)
+    print("SHA256(b) :", hash_b)
 
 
 # ────────────────────────────────────────────────────────────── #
