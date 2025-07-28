@@ -24,10 +24,10 @@ DeepSigns – 공통 유틸리티 모음
 
 import torch
 import torch.nn.functional as F
-import numpy as np
+import os, numpy as np
 from scipy.special import comb
 from torch.utils.data import ConcatDataset, DataLoader, Subset
-
+from torch.utils.data import WeightedRandomSampler
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║ 1. 블랙박스 키 생성 (Algorithm 2)                                     ║
@@ -226,6 +226,13 @@ def subsample_training_data(dataset, target_class):
     subset    = Subset(dataset, picked)
     return DataLoader(subset, batch_size=128, shuffle=False)
 
+def make_balanced_loader(dataset, target_class, batch_size=32):
+    # class 0 이미지에 10배 가중치
+    labels = np.array(dataset.targets)
+    weights = np.ones_like(labels, dtype=float)
+    weights[labels == target_class] *= 10.0
+    sampler = WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True)
+    return torch.utils.data.DataLoader(dataset, batch_size=batch_size, sampler=sampler)
 
 def train_whitebox(model,
                    optimizer,
@@ -296,3 +303,55 @@ def train_whitebox(model,
                           args.gamma * loss4)
             total_loss.backward()
             optimizer.step()
+
+    if not is_attack:          # 공격 실험 아닐 때만
+        with torch.no_grad():
+            mu_k     = centers[args.target_class]               # [512]
+            logits_w = torch.sigmoid(x_value.matmul(mu_k))      # [embed_bits]
+            pred_bits = (logits_w > 0.5).cpu().numpy().astype(int)
+
+            gt_bits   = b[:, args.target_class].cpu().numpy()   # [embed_bits]
+            same_all  = (pred_bits == gt_bits).all()
+            diff_cnt  = (pred_bits != gt_bits).sum()
+
+            print("=== FINAL BIT CHECK ===")
+            print(f"equal? {same_all}   (mismatch {diff_cnt}/{args.embed_bits})")
+            # ④ 저장
+            save_dir = "logs/whitebox/mlp/marked"
+            os.makedirs(save_dir, exist_ok=True)
+
+            if same_all:
+                np.save(f"{save_dir}/b.npy", gt_bits)
+                print(f"[OK] b 완전 일치 → b.npy 저장 (embed_bits={args.embed_bits})")
+            else:
+                np.save(f"{save_dir}/b_mismatch.npy", pred_bits)
+                print(f"[WARN] b 불일치 ({diff_cnt} bits) → b_mismatch.npy 저장")
+
+    # # ────── 에포크 루프 종료 후 (for ep ... 끝난 직후) ──────
+    # if ep == args.epochs - 1:                        # 마지막 에포크
+    #     with torch.no_grad():
+    #         # ① 모든 클래스 중심 μ_c 로부터 예측 비트행렬 계산
+    #         centers_cpu = centers.detach().cpu()        # [C,512]
+    #         A_np        = x_value.cpu().numpy()         # [N,512]
+    #         logits_all  = torch.sigmoid(
+    #             torch.matmul(centers_cpu, torch.tensor(A_np).T)    # [C,N]
+    #         ).T.numpy()                                 # [N,C]
+    #         pred_bits   = (logits_all > 0.5).astype(np.uint8)      # 0/1
+
+    #         # ② 원본 b (Tensor → NumPy) 준비
+    #         gt_bits     = b.cpu().numpy().astype(np.uint8)         # [N,C]
+
+    #         # ③ 완전 일치 여부 판단
+    #         equal_all   = np.array_equal(pred_bits, gt_bits)
+    #         diff_cnt    = (pred_bits != gt_bits).sum()
+
+    #         # ④ 저장
+    #         save_dir = "logs/whitebox/mlp/marked"
+    #         os.makedirs(save_dir, exist_ok=True)
+
+    #         if equal_all:
+    #             np.save(f"{save_dir}/b.npy", gt_bits)
+    #             print(f"[OK] b 완전 일치 → b.npy 저장 (embed_bits={args.embed_bits})")
+    #         else:
+    #             np.save(f"{save_dir}/b_mismatch.npy", pred_bits)
+    #             print(f"[WARN] b 불일치 ({diff_cnt} bits) → b_mismatch.npy 저장")
