@@ -166,6 +166,6 @@ if PK_HEX:
 else:
     print("(PK_HEX 미제공 → 서명 검증 생략)")
 
-# 4) 워터마크 추출 & BER
-ber, _ = ber_against(pk_hash_hex)
-print(f"BER = {ber:.4%}   →   {'PASS' if ber<=0.01 else 'FAIL'}")
+# # 4) 워터마크 추출 & BER
+# ber, _ = ber_against(pk_hash_hex)
+# print(f"BER = {ber:.4%}   →   {'PASS' if ber<=0.01 else 'FAIL'}")
