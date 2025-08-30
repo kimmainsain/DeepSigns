@@ -1,8 +1,7 @@
 # verify.py  ───────────────────────────────────────────
 """
-(1) --pk-hex <공개키>      : 저장된 b.npy 와 b^ 비교 (BER 출력)
-(2) --local                : 로컬 모델 + pk_hash.txt 로 BER 검증
-(3) --nft --token-id <id>  : 온체인 NFT + 서명 + BER 풀검증
+(1) --local --pk-hex <공개키>  : 로컬 모델 + pk로 b 생성 → BER 검증
+(2) --nft --token-id <id>   : 온체인 NFT + 서명 + BER 풀검증
 ────────────────────────────────────────────────────────
 """
 import os, sys, json, hashlib, argparse, requests
@@ -25,9 +24,7 @@ mode.add_argument("--nft",   action="store_true",
                   help="온체인 + 서명 + 워터마크 검증")
 mode.add_argument("--local", action="store_true",
                   help="로컬 모델 BER 검증")
-mode.add_argument("--pk-hex",
-                  help="공개키 → b^ 생성 후 저장된 b.npy 와 BER 비교")
-
+cli.add_argument("--pk-hex", help="공개키(PK HEX). --local에서 필수")
 cli.add_argument("--token-id", type=int, default=1,
                  help="NFT tokenId (--nft 모드)")
 args = cli.parse_args()
@@ -44,6 +41,20 @@ PK_FILE    = os.path.join(MARK_DIR, "pk_hash.txt")
 def clean_hex(h: str) -> str:
     h = h.strip().lower()
     return h[2:] if h.startswith("0x") else h
+
+def canonicalize_pk_bytes(pk_hex: str) -> bytes:
+    """HEX로 들어온 공개키를 64바이트(X||Y)로 정규화.
+       - 65바이트 0x04||X||Y → X||Y로 변환
+       - 64바이트 X||Y → 그대로 통과
+       - 그 외 길이는 그대로 반환(필요시 에러로 바꿔도 됨)
+    """
+    h = clean_hex(pk_hex)
+    b = bytes.fromhex(h)
+    if len(b) == 65 and b[0] == 0x04:
+        return b[1:]
+    if len(b) == 64:
+        return b
+    return b  # 압축키(33B) 등은 별도 처리 필요하면 에러로 바꿔도 OK
 
 def pkhex_to_bits(pk_hex: str) -> np.ndarray:
     """공개키 → SHA‑256 → (256,) ndarray(0/1)"""
@@ -67,50 +78,37 @@ def load_model():
 
 def ber_against(pk_hash_hex: str):
     net, A, dev = load_model()
+
+    # torchvision.transforms 를 T로 import 했다면 여기선 그대로 사용 가능
     tf = T.Compose([T.ToTensor()])
     tr = torchvision.datasets.MNIST("./data", train=True,
                                     transform=tf, download=True)
     subset = subsample_training_data(tr, 0)
-    bits   = extract_WM_from_activations(get_activations(net, subset), A)
-    ref    = np.unpackbits(np.frombuffer(bytes.fromhex(pk_hash_hex),
-                                         dtype=np.uint8))
+
+    acts = get_activations(net, subset)
+    bits = extract_WM_from_activations(acts, A)  # shape (L, 1) or (L, C)
+
+    # 1) 추출된 비트 길이
+    t_len = bits.shape[0] if bits.ndim >= 1 else A.shape[0]
+
+    # 2) 해시 256비트에서 앞 t_len비트만 사용
+    ref_all = np.unpackbits(
+        np.frombuffer(bytes.fromhex(pk_hash_hex), dtype=np.uint8)
+    )  # (256,)
+    if t_len > 256:
+        raise ValueError(f"t_len={t_len} > 256: SHA-256 앞부분만 지원")
+
+    ref = ref_all[:t_len]  # (t_len,)
+
     return compute_BER(bits, ref), bits
-
-# ─── (A) PK_HEX → b̂ ↔ 저장된 b 비교 모드 ─────────────
-if args.pk_hex:
-    print("[MODE] 저장된 b ↔ pk_hex  일치도 검증")
-
-    # 1) 저장된 b 로드
-    b_saved = load_b_saved()             # (256,) or (2560,) or (256,10)
-    if b_saved.ndim == 1:                # (2560,) 형태이면 (256, n_cls) 로 변환
-        if b_saved.size % 256 != 0:
-            sys.exit("[ERR] b.npy 길이가 256의 배수가 아닙니다")
-        n_cls   = b_saved.size // 256
-        b_saved = b_saved.reshape(256, n_cls)
-    else:
-        n_cls = b_saved.shape[1]
-
-    # 2) pk_hex → 256‑bit b̂
-    b_hat = pkhex_to_bits(args.pk_hex)    # (256,)
-
-    # 3) 열 수에 맞춰 복제
-    b_hat_full = np.tile(b_hat[:, None], (1, n_cls))  # (256, n_cls)
-    # 4) BER
-    ber      = (b_hat_full != b_saved).mean()
-    diff_cnt = (b_hat_full != b_saved).sum()
-
-    print(f"BER(b vs b̂) = {ber:.4%}   (mismatch {diff_cnt}/{b_hat_full.size})")
-    print("equal?" , diff_cnt == 0)
-    sys.exit(0)
-
 
 # ─── (B) LOCAL BER 모드 ───────────────────────────────
 if args.local:
     print("[MODE] Local BER 검증 (임계 ≤ 1 %)")
-    if not os.path.exists(PK_FILE):
-        sys.exit("[ERR] pk_hash.txt 가 없습니다")
-    pk_hash_hex = open(PK_FILE).read().strip()
-
+    if not args.pk_hex:
+        sys.exit("[ERR] --local 모드에서는 --pk-hex <공개키HEX>가 필수입니다")
+    # 공개키 → SHA-256 해시(256bit) → hex
+    pk_hash_hex = hashlib.sha256(bytes.fromhex(clean_hex(args.pk_hex))).hexdigest()
     ber, _ = ber_against(pk_hash_hex)
     print(f"BER (class 0) = {ber:.4%}   →   {'PASS' if ber<=0.01 else 'FAIL'}")
     sys.exit(0)

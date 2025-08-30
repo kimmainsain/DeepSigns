@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 run_whitebox_mnist.py
 ───────────────────────────────────────────────────────────────────────────────
@@ -8,7 +9,6 @@ DeepSigns – MNIST 화이트박스(N-bit) 워터마크 **삽입 + 추출** 실�
                      train_whitebox() 호출 → 식 (1)(3) 학습 ➌
     테스트        :   원본 정확도 확인
     Alg. 3       :   키 서브셋 → μ′ → A·μ′ → BER 계산 ➍
-
 ───────────────────────────────────────────────────────────────────────────────
 """
 
@@ -21,9 +21,12 @@ import torch
 import torch.nn.functional as F
 import torchvision
 from torchvision import transforms
-from models.mlp import MLP                # 두 층 512-FC MLP + feat 반환
-from utils import *                       # train_whitebox, BER 등 유틸
+from models.mlp import MLP
+from utils import *
 import hashlib
+
+from dotenv import load_dotenv
+import ecdsa
 
 # ── 프로젝트 루트 경로 추가 ───────────────────────────────── #
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,7 +35,7 @@ sys.path.insert(0, os.path.join(current_dir, '..'))
 
 def run(args):
     # ───────────────────────────────────────────────────────── #
-    # 0. 환경 설정 + MNIST 데이터 로드                           #
+    # 0. 환경 설정 + MNIST 데이터 로드
     # ───────────────────────────────────────────────────────── #
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     transform = transforms.Compose([transforms.ToTensor()])
@@ -47,16 +50,49 @@ def run(args):
     testloader = torch.utils.data.DataLoader(
         testset, batch_size=512, shuffle=False)
 
-    # ───────────────────────────────────────────────────────── #
-    # 1. (Fig. 1 ③-①)  워터마크 비트열 b 생성                   #
-    #    b ∈ {0,1}^{embed_bits × 10} (N-bit × 클래스)           #
-    # ───────────────────────────────────────────────────────── #
-    b = np.random.randint(2, size=(args.embed_bits, args.n_classes))
-    np.save('logs/whitebox/mlp/marked/b.npy', b)  # 비트열 b 저장
-    # (저장은 필요 시 utils 내부에서 진행하므로 여기선 메모리 보관)
+    # 로그 디렉터리 보장
+    out_dir = 'logs/whitebox/mlp/marked'
+    os.makedirs(out_dir, exist_ok=True)
 
     # ───────────────────────────────────────────────────────── #
-    # 2. (Fig. 1 ③-②)  모델 & 센터 μ 초기화                    #
+    # 1. (Fig. 1 ③-①)  워터마크 비트열 b 생성 (PK 해시 앞 32bit)
+    #    b ∈ {0,1}^{embed_bits × 10}
+    # ───────────────────────────────────────────────────────── #
+    load_dotenv()  # .env 에 PRIVATE_KEY_HEX 필요
+    sk_hex = os.getenv("PRIVATE_KEY_HEX")
+    if not sk_hex:
+        sys.exit("[ERR] .env 에 PRIVATE_KEY_HEX 가 없습니다")
+
+    # 개인키 → 공개키(언컴프레스트) → SHA-256
+    sk = ecdsa.SigningKey.from_string(bytes.fromhex(sk_hex), curve=ecdsa.SECP256k1)
+    pk_bytes = sk.get_verifying_key().to_string("uncompressed")  # 65 bytes
+    pk_hash  = hashlib.sha256(pk_bytes).digest()                  # 32 bytes (256bit)
+
+    # 앞쪽 embed_bits 만큼 비트 추출 (기본 32)
+    T = int(args.embed_bits)
+    if T > 256:
+        sys.exit("[ERR] embed_bits가 256을 초과했습니다. (현재 구현은 SHA-256 앞부분만 사용)")
+
+    all_bits = np.unpackbits(np.frombuffer(pk_hash, dtype=np.uint8))  # (256,)
+    bitsT = all_bits[:T]                                              # (T,)
+    b = np.tile(bitsT[:, None], (1, args.n_classes)).astype(np.uint8) # (T, n_classes)
+
+    # 디버그 출력 (hex, bitstring)
+    need_bytes = (T + 7) // 8  # T=32 → 4 bytes
+    print(f"[INFO] pk_hash (full hex)   : {pk_hash.hex()}")
+    print(f"[INFO] pk_hash first {T}bits: {pk_hash[:need_bytes].hex()} (hex, truncated to {T} bits)")
+    print(f"[INFO] b shape              : {b.shape}")
+    print(f"[INFO] first-{T} bitstring  : {''.join(map(str, bitsT.tolist()))}")
+
+    # 아티팩트 저장
+    np.save(os.path.join(out_dir, 'b.npy'), b)
+    with open(os.path.join(out_dir, 'pk_hex.txt'), 'w') as f:
+        f.write("04" + pk_bytes.hex())
+    with open(os.path.join(out_dir, 'pk_hash.txt'), 'w') as f:
+        f.write(pk_hash.hex())
+
+    # ───────────────────────────────────────────────────────── #
+    # 2. (Fig. 1 ③-②)  모델 & 센터 μ 초기화
     # ───────────────────────────────────────────────────────── #
     model = MLP().to(device)                        # forward → (logits, feat)
     centers = torch.nn.Parameter(
@@ -68,18 +104,16 @@ def run(args):
         lr=args.lr, alpha=0.9, eps=1e-8, weight_decay=1e-3)
 
     # ───────────────────────────────────────────────────────── #
-    # 3. (Fig. 1 ③-③)  워터마크 삽입 학습                       #
-    #    train_whitebox() :  CE + λ₁(loss1+2+3) + λ₂·loss4      #
-    #    투영행렬 A 는 logs/whitebox/mlp/marked/projection_matrix.npy 에 저장
+    # 3. 워터마크 삽입 학습 (투영행렬 A 저장)
     # ───────────────────────────────────────────────────────── #
     train_whitebox(model, optimizer, trainloader,
                    b=b,
                    centers=centers,
                    args=args,
-                   save_path='./logs/whitebox/mlp/marked/projection_matrix.npy')
+                   save_path=os.path.join(out_dir, 'projection_matrix.npy'))
 
     # ───────────────────────────────────────────────────────── #
-    # 4. 모델 성능 확인 (정확도·Loss)                           #
+    # 4. 모델 성능 확인
     # ───────────────────────────────────────────────────────── #
     model.eval()
     loss_meter, acc_meter = 0, 0
@@ -93,29 +127,22 @@ def run(args):
     print('Test accuracy:', acc_meter  / len(testloader.dataset))
 
     # 모델 파라미터(워터마크 포함) 저장
-    sd_path = 'logs/whitebox/mlp/marked/mlp.pth'
+    sd_path = os.path.join(out_dir, 'mlp.pth')
     torch.save(model.state_dict(), sd_path)
 
     # ───────────────────────────────────────────────────────── #
-    # 5. 워터마크 추출·검증 (Alg. 3)                            #
+    # 5. 워터마크 추출·검증 (Alg. 3)
     # ───────────────────────────────────────────────────────── #
-    # 5-1. 마크드 모델 로드
     marked_model = MLP().to(device)
-    # summary(marked_model, input_size=(1, 28, 28))  # 네트워크 구조 보기
-    marked_model.load_state_dict(torch.load(sd_path))
+    marked_model.load_state_dict(torch.load(sd_path, map_location=device))
 
-    # 5-2. (Step I)  target_class(=digit) 데이터 절반 서브샘플
     subset_loader = subsample_training_data(trainset, args.target_class)
-
-    # 5-3. (Step II) feat 활성값 수집
     activations = get_activations(marked_model, subset_loader)
     print("Collected activations of first WM-carrying dense layer")
 
-    # 5-4. (Step III–IV) A·μ′ → 비트 복원
-    A = np.load('logs/whitebox/mlp/marked/projection_matrix.npy')
+    A = np.load(os.path.join(out_dir, 'projection_matrix.npy'))
     decoded_bits = extract_WM_from_activations(activations, A)
 
-    # 5-5. (Step V) BER 계산
     BER = compute_BER(decoded_bits, b[:, args.target_class])
     print(f"BER for class {args.target_class} = {BER}")
 
@@ -129,18 +156,16 @@ def run(args):
 
     def sha256_of_npy(path):
         data = np.load(path)
-        h    = hashlib.sha256(data.tobytes()).hexdigest()
-        return h
+        return hashlib.sha256(data.tobytes()).hexdigest()
 
-    hash_A = sha256_of_npy('logs/whitebox/mlp/marked/projection_matrix.npy')
-    hash_b = sha256_of_npy('logs/whitebox/mlp/marked/b.npy')
-
-    print("SHA256(A) :", hash_A)
-    print("SHA256(b) :", hash_b)
+    print("SHA256(A) :", sha256_of_npy(os.path.join(out_dir, 'projection_matrix.npy')))
+    print("SHA256(b) :", sha256_of_npy(os.path.join(out_dir, 'b.npy')))
+    counts = np.bincount(np.array(trainset.targets))
+    print(counts, counts.sum())  # 클래스별 개수와 총합(60000)
 
 
 # ────────────────────────────────────────────────────────────── #
-#  CLI 인수 정의                                                  #
+#  CLI 인수 정의
 # ────────────────────────────────────────────────────────────── #
 def main():
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
@@ -160,8 +185,11 @@ def main():
                         help='λ₂ (watermark CE weight)')
     parser.add_argument('--target_dense_idx', type=int, default=2,
                         help='(unused for this MLP) Dense layer index placeholder')
-    parser.add_argument('--embed_bits', type=int, default=16,
-                        help='N : number of watermark bits per class')
+
+    # ★ 기본값 32로 변경: SHA-256 앞 32bit 사용
+    parser.add_argument('--embed_bits', type=int, default=32,
+                        help='N : number of watermark bits per class (≤256)')
+
     parser.add_argument('--target_class', type=int, default=0,
                         help='Digit (0-9) chosen for extraction demo')
     args = parser.parse_args()
