@@ -1,0 +1,11 @@
+.DS_Store
+target/
+.risc0/
+data/*.bin
+data/*.npy
+data/public.json
+data/receipt.bin
+.venv/
+Cargo.lock
+methods/guest/Cargo.lock
+target/

@@ -1,0 +1,13 @@
+[package]
+name = "wb_guest"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+risc0-zkvm = { version = "3", default-features = false }
+serde      = { version = "1", default-features = false, features = ["derive", "alloc"] }
+sha2       = { version = "0.10", default-features = false }
+hex        = { version = "0.4",  default-features = false, features = ["alloc"] }
+
