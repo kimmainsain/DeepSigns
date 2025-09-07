@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torchvision import transforms
 from dotenv import load_dotenv
 import ecdsa
+import json, math
 
 from models.mlp import MLP
 from utils import train_whitebox, make_balanced_loader
@@ -60,7 +61,7 @@ def run(args):
     pk_bytes = sk.get_verifying_key().to_string("uncompressed")  # 65 bytes
     pk_hash  = hashlib.sha256(pk_bytes).digest()                  # 32 bytes (256bit)
 
-    # 앞쪽 embed_bits 만큼 비트 추출 (기본 32)
+    # 앞쪽 embed_bits 만큼 비트 추출 (default : 128 bits)
     T = int(args.embed_bits)
     if T > 256:
         sys.exit("[ERR] embed_bits가 256을 초과했습니다. (현재 구현은 SHA-256 앞부분만 사용)")
@@ -124,19 +125,17 @@ def run(args):
     with open(f"{out_dir}/pk_hash.txt", "w") as f: f.write(pk_hash.hex())
     print("[OK] model / pk_hex / pk_hash / b.npy saved")
     
-    
-        # ========== (1) A → A.npy로 저장 ==========
-    A_src = "logs/whitebox/mlp/marked/projection_matrix.npy"
-    A = np.load(A_src).astype(np.float32)
-
-    zkvm_data_dir = os.path.expanduser("~/zkvm/wm_proof/data")
+    deepsigns_root = current_dir
+    zkvm_data_dir = os.path.join(deepsigns_root, 'zkvm', 'data')
     os.makedirs(zkvm_data_dir, exist_ok=True)
+
+    # ========== (1) A → A.npy 저장 ==========
+    A_src = os.path.join(out_dir, 'projection_matrix.npy')  # logs/.../projection_matrix.npy
+    A = np.load(A_src).astype(np.float32)
     np.save(os.path.join(zkvm_data_dir, "A.npy"), A)
 
-    # ========== (2) mu 계산 후 mu.npy 저장 ==========
-    #  - 여기선 'target_class'의 샘플들로 MLP의 은닉표현 평균을 뮤로 사용
-    #  - 모델은 위에서 학습된 'model' (model(x) -> (logits, feat) 가정)
-
+    # ========== (2) μ 계산 후 mu.npy 저장 ==========
+    #  - target_class 샘플들로 MLP 은닉표현 평균을 μ로 사용
     def compute_mu(model, dataset, target_class, device, batch_size=256):
         loader = make_balanced_loader(dataset, target_class, batch_size=batch_size)
         model.eval()
@@ -149,15 +148,68 @@ def run(args):
         mu = torch.cat(feats, dim=0).mean(dim=0).numpy().astype(np.float32)  # (D,)
         return mu
 
-    # 학습에 썼던 'tr'(train MNIST), 'args.target_class', 'dev' 그대로 활용
     mu_vec = compute_mu(model, trainset, args.target_class, device, batch_size=512)
     np.save(os.path.join(zkvm_data_dir, "mu.npy"), mu_vec)
 
-    # (선택) 공개키도 같이 복사
+    # (선택) 공개키도 같이 저장 — zkVM 쪽에서 정규화하므로 여기서는 '04' 없이 raw hex로 저장
     with open(os.path.join(zkvm_data_dir, "pk_hex.txt"), "w") as f:
         f.write(pk_bytes.hex())
 
     print(f"[OK] Saved for zkVM: {zkvm_data_dir}/A.npy, {zkvm_data_dir}/mu.npy, pk_hex.txt")
+
+    # ========== (3) A_int.bin / mu_int.bin & public.json 생성 ==========
+    # - A, μ 정수화(i64, little-endian) → h_a 해시 → public.json 기록
+    try:
+        # (a) 정수화 스케일/규칙
+        scale = 4096                      # 고정소수 스케일 (필요시 조정)
+        sign_zero_rule = "ge_zero_is_one" # z_i >= 0이면 1, 아니면 0
+
+        # (b) 실수 → 정수화
+        #    안전장치: 차원 일치 확인 (A.shape = (L, D), mu.shape = (D,))
+        L, D = A.shape
+        assert mu_vec.shape[0] == D, f"[ERR] mu dimension {mu_vec.shape[0]} != A.D {D}"
+
+        A_int  = np.rint(A * scale).astype(np.int64)       # (L, D)
+        mu_int = np.rint(mu_vec * scale).astype(np.int64)  # (D,)
+
+        # (c) .bin (i64, little-endian)로 저장
+        A_bin_path  = os.path.join(zkvm_data_dir, "A_int.bin")
+        mu_bin_path = os.path.join(zkvm_data_dir, "mu_int.bin")
+        with open(A_bin_path, "wb") as f:
+            f.write(A_int.astype("<i8", copy=False).tobytes())
+        with open(mu_bin_path, "wb") as f:
+            f.write(mu_int.astype("<i8", copy=False).tobytes())
+
+        # (d) h_a = SHA256(A_int.bin 바이트 그대로)
+        with open(A_bin_path, "rb") as f:
+            h_a = hashlib.sha256(f.read()).hexdigest()
+
+        # (e) public.json 필드 계산
+        #     기본 τ = ceil(0.2 * L) (실험에 맞춰 조정 가능)
+        tau = int(math.ceil(0.2 * L))
+        tau = max(1, tau)
+
+        with open(os.path.join(zkvm_data_dir, "pk_hex.txt"), "r") as f:
+            pk_hex_for_public = f.read().strip()
+
+        public = {
+            "h_a": h_a,
+            "pk_hex": pk_hex_for_public,  # 게스트/호스트에서 정규화 처리
+            "l": int(L),
+            "tau": int(tau),
+            "scale": int(scale),          # 메타 정보(연산엔 영향 X)
+            "sign_zero_rule": sign_zero_rule
+        }
+
+        public_path = os.path.join(zkvm_data_dir, "public.json")
+        with open(public_path, "w", encoding="utf-8") as f:
+            json.dump(public, f, ensure_ascii=False, indent=2)
+
+        print(f"[OK] Generated zkVM inputs: {A_bin_path}, {mu_bin_path}, {public_path}")
+        print(f"[INFO] L={L}, D={D}, tau={tau}, scale={scale}, h_a={h_a[:16]}...")
+
+    except Exception as e:
+        print(f"[WARN] Failed to generate zkVM .bin/public.json: {e}")
 
 
 def main():
@@ -168,7 +220,7 @@ def main():
     p.add_argument("--scale",         type=float, default=0.02)
     p.add_argument("--gamma",         type=float, default=0.15)
     p.add_argument("--target_class",  type=int,   default=0)
-    p.add_argument('--embed_bits', type=int, default=32,
+    p.add_argument('--embed_bits', type=int, default=128,
                         help='N : number of watermark bits per class (≤256)')
     args = p.parse_args()
 

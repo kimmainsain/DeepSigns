@@ -79,12 +79,10 @@ def load_model():
 def ber_against(pk_hash_hex: str):
     net, A, dev = load_model()
 
-    # torchvision.transforms 를 T로 import 했다면 여기선 그대로 사용 가능
     tf = T.Compose([T.ToTensor()])
     tr = torchvision.datasets.MNIST("./data", train=True,
                                     transform=tf, download=True)
     subset = subsample_training_data(tr, 0)
-
     acts = get_activations(net, subset)
     bits = extract_WM_from_activations(acts, A)  # shape (L, 1) or (L, C)
 
@@ -98,15 +96,14 @@ def ber_against(pk_hash_hex: str):
     if t_len > 256:
         raise ValueError(f"t_len={t_len} > 256: SHA-256 앞부분만 지원")
 
-    ref = ref_all[:t_len]  # (t_len,)
-
+    ref = ref_all[:t_len]
     return compute_BER(bits, ref), bits
 
 # ─── (B) LOCAL BER 모드 ───────────────────────────────
 if args.local:
     print("[MODE] Local BER 검증 (임계 ≤ 1 %)")
     if not args.pk_hex:
-        sys.exit("[ERR] --local 모드에서는 --pk-hex <공개키HEX>가 필수입니다")
+        sys.exit("[ERR] --local 모드에서는 --pk-hex <공개키HEX>가 필요합니다.")
     # 공개키 → SHA-256 해시(256bit) → hex
     pk_hash_hex = hashlib.sha256(bytes.fromhex(clean_hex(args.pk_hex))).hexdigest()
     ber, _ = ber_against(pk_hash_hex)
