@@ -1,5 +1,5 @@
 # register_sig_only_digest.py
-import os, sys, json, hashlib
+import os, sys, json, hashlib, ecdsa
 from web3 import Web3
 from eth_account import Account
 from dotenv import load_dotenv
@@ -22,12 +22,11 @@ with open(MODEL_PATH, "rb") as f:
     model_hash_digest = hashlib.sha256(f.read()).digest()  # bytes(32)
 
 # 2) ECDSA 서명: digest 전용
-import ecdsa, hashlib as _hashlib
 sk  = ecdsa.SigningKey.from_string(bytes.fromhex(SK_HEX), curve=ecdsa.SECP256k1)
 # DER 서명으로 고정(가변 길이  ~70B), digest에 대해 결정적 서명
 sig = sk.sign_digest_deterministic(
     model_hash_digest,
-    hashfunc=_hashlib.sha256,
+    hashfunc=hashlib.sha256,
     sigencode=ecdsa.util.sigencode_der
 )
 

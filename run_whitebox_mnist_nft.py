@@ -3,11 +3,16 @@
 run_whitebox_mnist.py  (훈련 전용)
 ────────────────────────────────────────────────────────
 산출물 (logs/whitebox/mlp/marked/):
-  • mlp_nft.pth           : 워터마크 삽입 모델
-  • projection_matrix.npy : DeepSigns 투영 행렬 A   (T=16 기준)
-  • pk_hex.txt            : 언컴프레스트 공개키
-  • pk_hash.txt           : SHA-256 해시 (256bit 전체)
-  • b.npy                 : 사용한 16비트 b (선택 저장)
+  • mlp_nft.pth            : 워터마크 삽입 모델
+  • projection_matrix.npy  : DeepSigns 투영 행렬 A   (T=16 기준)
+  • sig_msg_hex.txt        : (기존 pk_hex.txt → 변경) 공개 아티팩트용 값
+  • pk_hash.txt            : SHA-256 해시 (256bit 전체, b 생성에 사용)
+  • b.npy                  : 사용한 16비트 b (선택 저장)
+
+zkVM 입력 (zkvm/data/):
+  • A.npy, mu.npy
+  • A_int.bin, mu_int.bin  : i64 little-endian
+  • public.json            : {h_a, h_mu, sig_msg_hex, l, tau, scale, sign_zero_rule}
 ────────────────────────────────────────────────────────
 """
 import os, sys, hashlib, random
@@ -48,7 +53,7 @@ def run(args):
     os.makedirs(out_dir, exist_ok=True)
 
     # ───────────────────────────────────────────────────────── #
-    # 1. (Fig. 1 ③-①)  워터마크 비트열 b 생성 (PK 해시 앞 32bit)
+    # 1. (Fig. 1 ③-①)  워터마크 비트열 b 생성 (PK 해시 앞 T비트)
     #    b ∈ {0,1}^{embed_bits × 10}
     # ───────────────────────────────────────────────────────── #
     load_dotenv()  # .env 에 PRIVATE_KEY_HEX 필요
@@ -79,8 +84,9 @@ def run(args):
 
     # 아티팩트 저장
     np.save(os.path.join(out_dir, 'b.npy'), b)
-    with open(os.path.join(out_dir, 'pk_hex.txt'), 'w') as f:
-        f.write("04" + pk_bytes.hex())
+    # (이전 pk_hex.txt → sig_msg_hex.txt 로 변경) — 현재는 공개키 바이트를 그대로 저장
+    with open(os.path.join(out_dir, 'sig_msg_hex.txt'), 'w') as f:
+        f.write(pk_bytes.hex())
     with open(os.path.join(out_dir, 'pk_hash.txt'), 'w') as f:
         f.write(pk_hash.hex())
 
@@ -121,9 +127,9 @@ def run(args):
 
     # 6) 산출물 저장
     torch.save(model.state_dict(), f"{out_dir}/mlp_nft.pth")
-    with open(f"{out_dir}/pk_hex.txt",  "w") as f: f.write("04" + pk_bytes.hex())
+    with open(f"{out_dir}/sig_msg_hex.txt",  "w") as f: f.write(pk_bytes.hex())
     with open(f"{out_dir}/pk_hash.txt", "w") as f: f.write(pk_hash.hex())
-    print("[OK] model / pk_hex / pk_hash / b.npy saved")
+    print("[OK] model / sig_msg_hex / pk_hash / b.npy saved")
     
     deepsigns_root = current_dir
     zkvm_data_dir = os.path.join(deepsigns_root, 'zkvm', 'data')
@@ -151,14 +157,14 @@ def run(args):
     mu_vec = compute_mu(model, trainset, args.target_class, device, batch_size=512)
     np.save(os.path.join(zkvm_data_dir, "mu.npy"), mu_vec)
 
-    # (선택) 공개키도 같이 저장 — zkVM 쪽에서 정규화하므로 여기서는 '04' 없이 raw hex로 저장
-    with open(os.path.join(zkvm_data_dir, "pk_hex.txt"), "w") as f:
+    # (선택) 공개 아티팩트도 같이 저장 — zkVM 쪽에서 정규화하므로 여기서는 raw hex로 저장
+    with open(os.path.join(zkvm_data_dir, "sig_msg_hex.txt"), "w") as f:
         f.write(pk_bytes.hex())
 
-    print(f"[OK] Saved for zkVM: {zkvm_data_dir}/A.npy, {zkvm_data_dir}/mu.npy, pk_hex.txt")
+    print(f"[OK] Saved for zkVM: {zkvm_data_dir}/A.npy, {zkvm_data_dir}/mu.npy, sig_msg_hex.txt")
 
     # ========== (3) A_int.bin / mu_int.bin & public.json 생성 ==========
-    # - A, μ 정수화(i64, little-endian) → h_a 해시 → public.json 기록
+    # - A, μ 정수화(i64, little-endian) → h_a / h_mu 해시 → public.json 기록
     try:
         # (a) 정수화 스케일/규칙
         scale = 4096                      # 고정소수 스케일 (필요시 조정)
@@ -180,21 +186,24 @@ def run(args):
         with open(mu_bin_path, "wb") as f:
             f.write(mu_int.astype("<i8", copy=False).tobytes())
 
-        # (d) h_a = SHA256(A_int.bin 바이트 그대로)
+        # (d) h_a / h_mu = SHA256(각 .bin 바이트)
         with open(A_bin_path, "rb") as f:
             h_a = hashlib.sha256(f.read()).hexdigest()
+        with open(mu_bin_path, "rb") as f:
+            h_mu = hashlib.sha256(f.read()).hexdigest()
 
         # (e) public.json 필드 계산
         #     기본 τ = ceil(0.2 * L) (실험에 맞춰 조정 가능)
         tau = int(math.ceil(0.2 * L))
         tau = max(1, tau)
 
-        with open(os.path.join(zkvm_data_dir, "pk_hex.txt"), "r") as f:
-            pk_hex_for_public = f.read().strip()
+        with open(os.path.join(zkvm_data_dir, "sig_msg_hex.txt"), "r") as f:
+            sig_msg_hex_for_public = f.read().strip()
 
         public = {
             "h_a": h_a,
-            "pk_hex": pk_hex_for_public,  # 게스트/호스트에서 정규화 처리
+            "h_mu": h_mu,                 # (신규) mu 커밋 추가
+            "sig_msg_hex": sig_msg_hex_for_public,  # (pk_hex → sig_msg_hex)
             "l": int(L),
             "tau": int(tau),
             "scale": int(scale),          # 메타 정보(연산엔 영향 X)
@@ -206,7 +215,7 @@ def run(args):
             json.dump(public, f, ensure_ascii=False, indent=2)
 
         print(f"[OK] Generated zkVM inputs: {A_bin_path}, {mu_bin_path}, {public_path}")
-        print(f"[INFO] L={L}, D={D}, tau={tau}, scale={scale}, h_a={h_a[:16]}...")
+        print(f"[INFO] L={L}, D={D}, tau={tau}, scale={scale}, h_a={h_a[:16]}..., h_mu={h_mu[:16]}...")
 
     except Exception as e:
         print(f"[WARN] Failed to generate zkVM .bin/public.json: {e}")
