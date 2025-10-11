@@ -6,8 +6,8 @@ use std::{fs, path::PathBuf};
 use sha3::{Digest as KeccakDigest, Keccak256};
 
 use sha2::Sha256;
-use risc0_zkvm::{default_prover, ExecutorEnv};
 use methods::{WB_GUEST_ELF, WB_GUEST_ID};
+use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts, ReceiptKind};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -169,13 +169,15 @@ fn main() -> Result<()> {
                 .write(&sec_guest)?
                 .build()?;
 
-            // 증명
+            // 증명: Groth16 영수증으로 생성
             let prover = default_prover();
-            let receipt = prover.prove(env, WB_GUEST_ELF)?;
+            let opts = ProverOpts::default().with_receipt_kind(ReceiptKind::Groth16);
+            let info = prover.prove_with_opts(env, WB_GUEST_ELF, &opts)?;
+            let receipt = info.receipt;
 
             // 저장
             fs::write(out, bincode::serialize(&receipt)?)?;
-            println!("OK: receipt written");
+            println!("OK: Groth16 receipt written");
         }
 
         Cmd::Verify { public, receipt } => {
