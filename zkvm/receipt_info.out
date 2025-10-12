@@ -1,0 +1,3 @@
+kind: Groth16
+seal_size: 256 bytes
+journal_len: 32 bytes
