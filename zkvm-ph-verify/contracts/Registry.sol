@@ -3,76 +3,75 @@ pragma solidity ^0.8.20;
 
 import "./IVerifierRouter.sol";
 
-/// @notice 간단한 앵커 + 검증 경로 컨트랙트
-/// - (Program ID, Public Data Hash) 조합을 등록(앵커) 후
-/// - verify에서 Proof Seal + Journal(= Public Data Hash 32바이트)을 받아
-///   1) 앵커 존재 확인
-///   2) Journal 길이/동일성 체크
-///   3) Journal Digest = SHA-256(Journal) 계산
-///   4) Verifier Router.verify 호출(성공 = revert 없음)
+/**
+ * @title Registry
+ * @notice (imageId, sha256(PH)) 앵커 저장 및 검증 호출 라우팅
+ * @dev 용어:
+ *      - imageId: RISC Zero program/image ID (bytes32)
+ *      - PH: 저널로 쓰는 32바이트 공개값 (bytes32)
+ *      - journalDigest: sha256(PH) (bytes32)
+ */
 contract Registry {
-    // -------------------------------
-    // [MOCK ↔ REAL 라우터 교체 안내]
-    // -------------------------------
-    // 1) 로컬(Mock) 모드:
-    //    - MockVerifierRouter를 배포하고, 그 주소를 constructor(router_)에 넘겨서 배포
-    //    - 나중에 실제 라우터로 바꾸고 싶으면 setRouter() 호출
-    //
-    // 2) 실제(테스트넷/메인넷) 모드:
-    //    - constructor(router_)에 해당 체인의 "실제 Verifier Router 주소"를 넣어 배포
-    //    - 또는 배포 후 setRouter()로 교체
-    //
-    // 👉 핵심: "router" 주소만 바꾸면 나머지 로직 변경 없이 동일하게 동작
     IVerifierRouter public router;
-
     address public owner;
-    modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
 
-    // (Program ID, Public Data Hash) → 등록 여부
+    // anchored[imageId][journalDigest] = true
     mapping(bytes32 => mapping(bytes32 => bool)) public anchored;
 
-    event Registered(bytes32 programId, bytes32 publicDataHash, address indexed owner);
-    event Verified(bytes32 programId, bytes32 publicDataHash, address indexed submitter);
+    event Registered(bytes32 indexed imageId, bytes32 indexed journalDigest, address indexed registrant);
+    event Verified(bytes32 indexed imageId, bytes32 indexed journalDigest, address indexed submitter);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "not owner");
+        _;
+    }
 
     constructor(address router_) {
+        require(router_ != address(0), "zero router");
         owner = msg.sender;
         router = IVerifierRouter(router_);
     }
 
-    /// @notice 라우터 교체 (Mock ↔ 실제)
     function setRouter(address router_) external onlyOwner {
+        require(router_ != address(0), "zero router");
         router = IVerifierRouter(router_);
     }
 
-    /// @notice 앵커 등록 (Claim ID 없이, (Program ID, Public Data Hash)로 식별)
-    function register(bytes32 programId, bytes32 publicDataHash) external {
-        anchored[programId][publicDataHash] = true;
-        emit Registered(programId, publicDataHash, msg.sender);
+    /// @notice 앵커 고정: (imageId, sha256(PH))를 저장
+    function register(bytes32 imageId, bytes32 ph /* PH raw (32B) */) external {
+        bytes32 digest = sha256(abi.encodePacked(ph)); // journalDigest = sha256(PH)
+        anchored[imageId][digest] = true;
+        emit Registered(imageId, digest, msg.sender);
     }
 
-    /// @notice 검증: Proof Seal + Journal(= Public Data Hash 32바이트 원문)
+    /// @notice 검증: Router를 통해 on-chain 검증을 수행
+    /// @param imageId    RISC Zero imageId
+    /// @param phClaim    호출자가 주장하는 PH (32B)
+    /// @param journalRaw 검증에 사용될 저널 원값(32B) — 설계상 PH와 동일해야 함
+    /// @param seal       Groth16/EVM proof 바이트
+    /// @return ok        검증 성공 시 true (실패 시 Router/Verifier에서 revert)
     function verify(
-        bytes32 programId,
-        bytes32 publicDataHash,
-        bytes calldata proofSeal,
-        bytes calldata journal
-    ) external {
-        require(anchored[programId][publicDataHash], "not anchored");
-        require(journal.length == 32, "journal len");
+        bytes32 imageId,
+        bytes32 phClaim,
+        bytes32 journalRaw,
+        bytes calldata seal
+    ) external returns (bool ok) {
+        // [STEP 2] 주석 해제하여 "저널 == PH 주장값" 강제
+        // require(journalRaw == phClaim, "journal != PH");
 
-        // bytes → bytes32 (길이 32 미만이면 abi.decode에서 revert)
-        bytes32 journal32 = abi.decode(journal, (bytes32));
-        require(journal32 == publicDataHash, "journal != PDH");
+        // journalDigest = sha256(journalRaw)
+        bytes32 digest = sha256(abi.encodePacked(journalRaw));
 
-        // 검증기 입력 규약: SHA-256(Journal)
-        bytes32 journalDigest = sha256(journal);
+        // [STEP 3] 주석 해제하여 "사전 앵커 필수" 강제
+        // require(anchored[imageId][digest], "not anchored");
 
-        // (Mock or Real) Verifier Router 호출
-        // - Mock: 이벤트만 발생, revert 없음 → 정상 흐름 확인용
-        // - Real: 실제 Groth16 증명 검증 수행 → 성공 시 revert 없음
-        router.verify(proofSeal, programId, journalDigest);
+        ok = router.verify(imageId, digest, seal); // 성공 시 true, 실패 시 revert
+        emit Verified(imageId, digest, msg.sender);
+    }
 
-        emit Verified(programId, publicDataHash, msg.sender);
+    /// @notice 보조: (imageId, ph)에 대한 앵커 여부 조회
+    function isAnchored(bytes32 imageId, bytes32 ph) external view returns (bool) {
+        bytes32 digest = sha256(abi.encodePacked(ph));
+        return anchored[imageId][digest];
     }
 }
-
