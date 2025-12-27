@@ -82,11 +82,10 @@ const DOMAIN: &[u8] = b"PK-PoMLO:v1";
 fn rule_id(name: &str) -> u8 {
     match name {
         "ge_zero_is_one" => 0,
-        _ => 0, // 필요 시 규칙 추가
+        _ => 0,
     }
 }
 
-/// PH = keccak256( DOMAIN, version, hA, hMu, keccak(sig_msg_bytes), L_BE, tau_BE, ruleId )
 fn calc_ph_keccak(
     sig_msg_hex: &str,
     h_a: [u8; 32],
@@ -163,7 +162,6 @@ fn main() -> Result<()> {
             };
             let sec_guest = SecretGuest { a_flat, l, d, mu: mu_vec };
 
-            // 게스트 실행 환경
             let env = ExecutorEnv::builder()
                 .write(&pub_guest)?
                 .write(&sec_guest)?
@@ -175,7 +173,6 @@ fn main() -> Result<()> {
             let info = prover.prove_with_opts(env, WB_GUEST_ELF, &opts)?;
             let receipt = info.receipt;
 
-            // 저장
             fs::write(out, bincode::serialize(&receipt)?)?;
             println!("OK: Groth16 receipt written");
         }
