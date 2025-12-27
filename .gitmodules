@@ -1,3 +1,9 @@
 [submodule "zkvm-ph-verify/lib/forge-std"]
 	path = zkvm-ph-verify/lib/forge-std
 	url = https://github.com/foundry-rs/forge-std
+[submodule "zkvm-ph-verify/lib/risc0-ethereum"]
+	path = zkvm-ph-verify/lib/risc0-ethereum
+	url = https://github.com/risc0/risc0-ethereum
+[submodule "zkvm-ph-verify/lib/openzeppelin-contracts"]
+	path = zkvm-ph-verify/lib/openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts
