@@ -14,5 +14,6 @@ methods = { path = "../methods" }
 sha2 = "0.10"
 sha3 = "0.10"
 risc0-zkvm = { version = "^3.0.1" }
+risc0-binfmt = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = "1.0"
